@@ -106,6 +106,7 @@ private:
     bool add_content_length(int content_length);
     bool add_linger();
     bool add_blank_line();
+     char *parse_header(char *line, const char *key, int k_len);
 
 public:
     static int m_epollfd;
