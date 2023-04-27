@@ -144,6 +144,7 @@ void http_conn::init()
     m_url = 0;
     m_version = 0;
     m_content_length = 0;
+    m_content_remain = 0;
     m_host = 0;
     m_start_line = 0;
     m_checked_idx = 0;
@@ -153,8 +154,13 @@ void http_conn::init()
     m_state = 0;
     timer_flag = 0;
     improv = 0;
+    recv_segment = false;
+    parse_by_line = true;
+    isformdata = false;
+    formdata_stage = FORMDATA_STAGE_BEGIN;
+    file_length = 0;
 
-    memset(m_read_buf, '\0', READ_BUFFER_SIZE);
+    memset(m_read_buf, '\0', READ_BUFFER_SIZE + 10);
     memset(m_write_buf, '\0', WRITE_BUFFER_SIZE);
     memset(m_real_file, '\0', FILENAME_LEN);
 }
@@ -164,6 +170,7 @@ void http_conn::init()
 http_conn::LINE_STATUS http_conn::parse_line()
 {
     char temp;
+
     for (; m_checked_idx < m_read_idx; ++m_checked_idx)
     {
         temp = m_read_buf[m_checked_idx];
@@ -199,16 +206,18 @@ bool http_conn::read_once()
 {
     if (m_read_idx >= READ_BUFFER_SIZE)
     {
+        LOG_INFO("m_read_idx >= READ_BUFFER_SIZE!!!!!!!!!!!!!!");
         return false;
     }
     int bytes_read = 0;
+    LOG_INFO("read_once:m_read_idx = %d", m_read_idx);
 
     // LT读取数据
     if (0 == m_TRIGMode)
     {
         bytes_read = recv(m_sockfd, m_read_buf + m_read_idx, READ_BUFFER_SIZE - m_read_idx, 0);
         m_read_idx += bytes_read;
-
+        LOG_INFO("LT读取数据bytes_read = %d, m_read_idx = %d", bytes_read, m_read_idx);
         if (bytes_read <= 0)
         {
             return false;
@@ -233,6 +242,7 @@ bool http_conn::read_once()
                 return false;
             }
             m_read_idx += bytes_read;
+            LOG_INFO("ET读数据bytes_read = %d, m_read_idx = %d", bytes_read, m_read_idx);
         }
         return true;
     }
@@ -286,16 +296,27 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char *text)
     return NO_REQUEST;
 }
 
-char *http_conn::parse_header(char *line, const char *key, int k_len)
+bool http_conn::parse_header(char *line)
 {
-    if (strncasecmp(line, key, k_len) == 0)
+    // if (strncasecmp(line, key, k_len) == 0)
+    // {
+    //     line += k_len;
+    //     line += strspn(line, " \t");
+    //     return line;
+    // }
+
+    string str = line;
+    regex pattern("^([^:]*): ?(.*)$");
+    smatch subMatch;
+
+    if (regex_match(str, subMatch, pattern))
     {
-        line += k_len;
-        line += strspn(line, " \t");
-        return line;
+        headers[subMatch[1]] = subMatch[2];
+        LOG_INFO("解析到header中的%s", headers[subMatch[1]].c_str());
+        return true;
     }
 
-    return NULL;
+    return false;
 }
 
 // 解析http请求的一个头部信息
@@ -305,61 +326,254 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
 
     if (text[0] == '\0')
     {
+        if (headers.count("Connection"))
+        {
+            if (headers["Connection"] == "keep-alive")
+            {
+                m_linger = true;
+                LOG_INFO("m_linger:%d", m_linger);
+            }
+        }
+
+        if (headers.count("Content-Length"))
+        {
+            m_content_length = atol(headers["Content-Length"].c_str());
+            LOG_INFO("m_content_length:%d", m_content_length);
+        }
+
+        if (headers.count("Host"))
+        {
+            m_host = (char *)headers["Host"].c_str();
+            LOG_INFO("m_host:%s", m_host);
+        }
+
         if (m_content_length != 0)
         {
+            m_content_remain = m_content_length; // 剩余量初始值
+            LOG_INFO("解析出header，请求体长度为:%d", m_content_length);
             m_check_state = CHECK_STATE_CONTENT;
+            isformdata = is_formdata(); // 查询是不是formdata请求
+            formdata_stage = FORMDATA_STAGE_BEGIN;
             return NO_REQUEST;
         }
+
+        LOG_INFO("解析出header，并且没有请求体");
         return GET_REQUEST;
-    }
-    else if (strncasecmp(text, "Connection:", 11) == 0)
-    {
-        text += 11;
-        text += strspn(text, " \t");
-        if (strcasecmp(text, "keep-alive") == 0)
-        {
-            m_linger = true;
-        }
-    }
-    // else if (strncasecmp(text, "Content-length:", 15) == 0)
-    // {
-    //     text += 15;
-    //     text += strspn(text, " \t");
-    //     m_content_length = atol(text);
-    // }
-    else if ((line = parse_header(text, "Content-length:", 15)) != NULL)
-    {
-        m_content_length = atol(line);
-        LOG_INFO("test:m_content_length:%d", m_content_length);
-    }
-    // else if (strncasecmp(text, "Host:", 5) == 0)
-    // {
-    //     text += 5;
-    //     text += strspn(text, " \t");
-    //     m_host = text;
-    // }
-    else if ((line = parse_header(text, "Host:", 5)) != NULL)
-    {
-        m_host = line;
-        LOG_INFO("test:m_host:%s", m_host);
     }
     else
     {
-        LOG_INFO("oop!unknow header: %s", text);
+        if (parse_header(text))
+        {
+        }
+        else
+        {
+            LOG_INFO("oop!unknow header: %s", text);
+        }
+        // if (strncasecmp(text, "Connection:", 11) == 0)
+        // {
+        //     text += 11;
+        //     text += strspn(text, " \t");
+        //     if (strcasecmp(text, "keep-alive") == 0)
+        //     {
+        //         m_linger = true;
+        //     }
+        // }
+        // else if (strncasecmp(text, "Content-length:", 15) == 0)
+        // {
+        //     text += 15;
+        //     text += strspn(text, " \t");
+        //     m_content_length = atol(text);
+        // }
+        // else if ((line = parse_header(text, "Content-length:", 15)) != NULL)
+        // {
+        //     m_content_length = atol(line);
+        //     LOG_INFO("test:m_content_length:%d", m_content_length);
+        // }
+        // else if (strncasecmp(text, "Host:", 5) == 0)
+        // {
+        //     text += 5;
+        //     text += strspn(text, " \t");
+        //     m_host = text;
+        // }
+        // else if ((parse_header(text, "Host:", 5)) != NULL)
+        // {
+        //     m_host = line;
+        //     LOG_INFO("test:m_host:%s", m_host);
+        // }
+        // else
+        // {
+        //     LOG_INFO("oop!unknow header: %s", text);
+        // }
     }
+
     return NO_REQUEST;
+}
+
+bool http_conn::is_permissible()
+{
+    strcpy(m_real_file, doc_root);
+    int len = strlen(doc_root);
+    // printf("m_url:%s\n", m_url);
+    const char *p = strrchr(m_url, '/');
+
+    if (cgi == 1 && (*(p + 1) == '9'))
+    {
+        LOG_INFO("formdata权限开启");
+        return true;
+    }
+    LOG_INFO("formdata权限没有开启");
+    return false;
+}
+
+bool parse_formdata_boundary(char *text, string &bound)
+{
+    if (strstr(text, bound.c_str()) != NULL)
+        return true;
+
+    return false;
+}
+
+// 解析formdata
+http_conn::FORMDATA_CODE http_conn::parse_content_formdata(char *text)
+{
+    // recv_segment = true;
+    vector<string> res;
+    string boundary_inter = "--" + boundary;
+    string boundary_end = "\r\n--" + boundary + "--\r\n";
+    string str = text;
+    size_t pos;
+
+    switch (formdata_stage)
+    {
+    case FORMDATA_STAGE_BEGIN: // 开始
+        LOG_INFO("formdata_stage:FORMDATA_STAGE_BEGIN");
+        if (strstr(text, boundary_inter.c_str()))
+        {
+            LOG_INFO("找到boundary分割行");
+            formdata_stage = FORMDATA_STAGE_ATTRI;
+
+            return FORMDATA_CODE_CONTINUTE;
+        }
+        else
+            return FORMDATA_CODE_BAD;
+        break;
+    case FORMDATA_STAGE_ATTRI: // 获取文件属性中
+        LOG_INFO("formdata_stage:FORMDATA_STAGE_ATTRI");
+
+        pos = str.find("filename=");
+        if (pos != str.npos)
+        {
+            str = str.substr(pos + 10, str.size());
+            size_t end = str.find("\"");
+            filename = str.substr(0, end);
+            LOG_INFO("获取filename:%s", filename.c_str());
+            // formdata_stage = FORMDATA_STAGE_ATTRI_B;
+            return FORMDATA_CODE_CONTINUTE;
+        }
+        return FORMDATA_CODE_CONTINUTE;
+        break;
+    // case FORMDATA_STAGE_ATTRI_B: // 已经获取属性，等待空行
+    //     LOG_INFO("formdata_stage:FORMDATA_STAGE_ATTRI_B");
+    //     if (text[0] == '\0')
+    //     {
+    //         formdata_stage = FORMDATA_STAGE_FILE;
+    //         parse_by_line = false; // 关闭逐行解析
+    //         LOG_INFO("关闭逐行解析");
+    //         return FORMDATA_CODE_CONTINUTE;
+    //     }
+    //     else
+    //         return FORMDATA_CODE_BAD;
+
+    //     break;
+    case FORMDATA_STAGE_FILE: // 获取文件中
+        LOG_INFO("formdata_stage:FORMDATA_STAGE_FILE");
+
+        if (m_content_remain <= 0)
+        {
+            LOG_INFO("接收文件最后一个包，m_content_remain:%d", m_content_remain);
+            
+            m_read_file_end = m_read_file_end - boundary_end.length();
+            
+            //这里不能用find、strstr直接去找字符串，因为这里的内容可能有‘\0’，提前结束比较
+            if (memcmp((m_read_buf + m_read_file_end), boundary_end.c_str(), boundary_end.length()) != 0)
+            {
+                LOG_INFO("错误：没找到boundary_end");
+                
+                LOG_INFO("数据包boundary_end的内容：%s", m_read_buf + m_read_file_end);
+                LOG_INFO("目标boundary_end的内容：%s", boundary_end.c_str());
+                return FORMDATA_CODE_BAD;
+            }
+            LOG_INFO("找到boundary_end");
+            LOG_INFO("本次接收文件块长度:%d", m_read_file_end - m_read_file_start);
+            file_length += m_read_file_end - m_read_file_start;
+            LOG_INFO("文件接收完毕，文件总长度:%d", file_length);
+            return FORMDATA_CODE_END;
+        }
+        else
+        {
+            LOG_INFO("本次接收文件块长度:%d", m_read_file_end - m_read_file_start);
+            file_length += m_read_file_end - m_read_file_start;
+            LOG_INFO("已接收文件长度:%d", file_length);
+
+            return FORMDATA_CODE_CONTINUTE_SEGMENT;
+        }
+
+        break;
+    default:
+        break;
+    }
 }
 
 // 判断http请求是否被完整读入
 http_conn::HTTP_CODE http_conn::parse_content(char *text)
 {
-    if (m_read_idx >= (m_content_length + m_checked_idx))
+
+    // if (m_read_idx >= (m_content_length + m_checked_idx))
+    // {
+    //     text[m_content_length] = '\0';
+    //     // POST请求中最后为输入的用户名和密码
+    //     m_string = text;
+    //     return GET_REQUEST;
+    // }
+    // if (m_read_idx >= (m_content_length + m_checked_idx))
+    // 获取空行
+    if (text[0] == '\0' && parse_by_line)
     {
-        text[m_content_length] = '\0';
-        // POST请求中最后为输入的用户名和密码
-        m_string = text;
-        return GET_REQUEST;
+        LOG_INFO("逐行读取时，读到空行");
+        if (formdata_stage == FORMDATA_STAGE_ATTRI)
+        {
+            formdata_stage = FORMDATA_STAGE_FILE;
+            parse_by_line = false; // 关闭逐行解析
+            LOG_INFO("文件属性获取结束，关闭逐行解析，进入FORMDATA_STAGE_FILE");
+            return FILE_REQUEST;
+        }
     }
+
+    if (!isformdata)
+    {
+        if (m_content_remain <= 0)
+        {
+            text[m_content_length] = '\0';
+            // POST请求中最后为输入的用户名和密码
+            m_string = text;
+            return GET_REQUEST;
+        }
+    }
+
+    if (isformdata) // 如果是formdata
+    {
+        LOG_INFO("开始解析formdata");
+
+        formdata_code = parse_content_formdata(text);
+        LOG_INFO("formdata_code:%d", formdata_code);
+        if (formdata_code == FORMDATA_CODE_END || formdata_code == FORMDATA_CODE_BAD)
+            return GET_REQUEST;
+        else if (formdata_code == FORMDATA_CODE_CONTINUTE_SEGMENT)
+            return NO_REQUEST;
+        else
+            return FILE_REQUEST;
+    }
+
     return NO_REQUEST;
 }
 
@@ -368,12 +582,58 @@ http_conn::HTTP_CODE http_conn::process_read()
     LINE_STATUS line_status = LINE_OK;
     HTTP_CODE ret = NO_REQUEST;
     char *text = 0;
+    long recv_len = 0;
 
-    while ((m_check_state == CHECK_STATE_CONTENT && line_status == LINE_OK) || ((line_status = parse_line()) == LINE_OK))
+    // while ((m_check_state == CHECK_STATE_CONTENT && line_status == LINE_OK) || ((line_status = parse_line()) == LINE_OK))
+    while (1)
     {
-        text = get_line();
+        // if ((m_check_state == CHECK_STATE_CONTENT && line_status == LINE_OK) || ((line_status = parse_line()) == LINE_OK))
+        if (m_check_state != CHECK_STATE_CONTENT) // 如果不是信息体，逐行解析
+        {
+            parse_by_line = true;
+        }
+        else
+        {
+            // long recv_len = m_checked_idx - m_start_line;
+
+            // if (m_content_length  <= m_read_idx - m_checked_idx)
+            // {}
+
+            // parse_by_line = true;
+        }
+
+        recv_len = 0;
+        if (parse_by_line)
+        {
+            if ((line_status = parse_line()) != LINE_OK)
+            {
+                return NO_REQUEST; // 缓冲区没有发现行，等待继续找
+            }
+            text = get_line();
+            LOG_INFO("读一行：%s", text);
+            recv_len = m_checked_idx - m_start_line;
+        }
+        else
+        {
+            if (m_check_state != CHECK_STATE_CONTENT)
+            {
+                parse_by_line = true;
+                return BAD_REQUEST;
+            }
+
+            // 一次性读完剩余的数据
+            recv_len = m_read_idx - m_checked_idx;
+            m_read_file_start = m_checked_idx;
+            text = m_read_buf + m_read_file_start;
+            m_read_file_end = m_read_idx;
+            LOG_INFO("一次性读完剩余的数据，读到数据长度：%d", recv_len);
+            m_read_buf[m_read_file_end] = '\0';
+            m_read_idx = 0;
+            m_checked_idx = 0;
+        }
+
         m_start_line = m_checked_idx;
-        LOG_INFO("%s", text);
+
         switch (m_check_state)
         {
         case CHECK_STATE_REQUESTLINE:
@@ -385,6 +645,7 @@ http_conn::HTTP_CODE http_conn::process_read()
         }
         case CHECK_STATE_HEADER:
         {
+            LOG_INFO("开始解析header");
             ret = parse_headers(text);
             if (ret == BAD_REQUEST)
                 return BAD_REQUEST;
@@ -396,9 +657,17 @@ http_conn::HTTP_CODE http_conn::process_read()
         }
         case CHECK_STATE_CONTENT:
         {
+            LOG_INFO("开始解析content");
+            if (m_content_remain > 0)
+                m_content_remain -= recv_len; // 更新信息体剩余量
+
+            LOG_INFO("m_content_remain:%d, recv_len:%d", m_content_remain, recv_len);
             ret = parse_content(text);
-            if (ret == GET_REQUEST)
+            if (ret == NO_REQUEST)
+                return NO_REQUEST;
+            else if (ret == GET_REQUEST)
                 return do_request();
+
             line_status = LINE_OPEN;
             break;
         }
@@ -406,7 +675,59 @@ http_conn::HTTP_CODE http_conn::process_read()
             return INTERNAL_ERROR;
         }
     }
+
     return NO_REQUEST;
+}
+
+vector<string> http_conn::split(const string &str, const string &pattern)
+{
+    vector<string> res;
+    if (str == "")
+        return res;
+    // 在字符串末尾也加入分隔符，方便截取最后一段
+    string strs = str + pattern;
+    size_t pos = strs.find(pattern);
+
+    while (pos != strs.npos)
+    {
+        string temp = strs.substr(0, pos);
+        res.push_back(temp);
+        // 去掉已分割的字符串,在剩下的字符串中进行分割
+        strs = strs.substr(pos + pattern.size(), strs.size());
+        pos = strs.find(pattern);
+    }
+
+    return res;
+}
+
+bool http_conn::is_formdata()
+{
+    string type = "multipart/form-data";
+    vector<string> res;
+
+    LOG_INFO("开始查询是不是formdata");
+    if (!headers.count("Content-Type"))
+    {
+        LOG_INFO("is_formdata:%s", "Cann't find Content-Type");
+        return false;
+    }
+
+    res = split(headers["Content-Type"], "; "); // 这里需要斟酌一下，能不能肯定是分号+空格？？？
+    if (res.size() < 2 || res[0] != "multipart/form-data")
+    {
+        LOG_INFO("is_formdata:%s", "Cann't find multipart/form-data");
+        return false;
+    }
+
+    size_t pos = res[1].find("boundary=");
+    if (pos != res[1].npos)
+    {
+        boundary = res[1].substr(9, res[1].size());
+        LOG_INFO("boundary:%s", boundary.c_str());
+        return is_permissible(); // 权限的限定，暂定
+    }
+
+    return false;
 }
 
 http_conn::HTTP_CODE http_conn::do_request()
@@ -415,6 +736,17 @@ http_conn::HTTP_CODE http_conn::do_request()
     int len = strlen(doc_root);
     // printf("m_url:%s\n", m_url);
     const char *p = strrchr(m_url, '/');
+
+    if (isformdata)
+    {
+        if (formdata_code == FORMDATA_CODE_END)
+        {
+            LOG_INFO("formdata recvd");
+            return GET_REQUEST;
+        }
+
+        return BAD_REQUEST;
+    }
 
     // 处理cgi
     if (cgi == 1 && (*(p + 1) == '2' || *(p + 1) == '3'))
@@ -712,6 +1044,7 @@ bool http_conn::process_write(HTTP_CODE ret)
 void http_conn::process()
 {
     HTTP_CODE read_ret = process_read();
+
     if (read_ret == NO_REQUEST)
     {
         modfd(m_epollfd, m_sockfd, EPOLLIN, m_TRIGMode);

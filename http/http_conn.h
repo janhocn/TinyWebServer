@@ -20,6 +20,8 @@
 #include <sys/wait.h>
 #include <sys/uio.h>
 #include <map>
+#include <regex>
+#include <string>
 
 #include "../lock/locker.h"
 #include "../CGImysql/sql_connection_pool.h"
@@ -68,6 +70,23 @@ public:
         LINE_OPEN
     };
 
+private:
+    enum FORMDATA_STAGE
+    {
+        FORMDATA_STAGE_BEGIN = 0,
+        FORMDATA_STAGE_ATTRI,
+        FORMDATA_STAGE_ATTRI_B,
+        FORMDATA_STAGE_FILE
+    };
+
+    enum FORMDATA_CODE
+    {
+        FORMDATA_CODE_CONTINUTE = 0,
+        FORMDATA_CODE_CONTINUTE_SEGMENT,
+        FORMDATA_CODE_END,
+        FORMDATA_CODE_BAD
+    };
+
 public:
     http_conn() {}
     ~http_conn() {}
@@ -106,7 +125,11 @@ private:
     bool add_content_length(int content_length);
     bool add_linger();
     bool add_blank_line();
-     char *parse_header(char *line, const char *key, int k_len);
+    bool parse_header(char *line);
+    bool is_formdata();
+    vector<string> split(const string &str, const string &pattern);
+    http_conn::FORMDATA_CODE parse_content_formdata(char *text);
+    bool is_permissible();
 
 public:
     static int m_epollfd;
@@ -117,19 +140,23 @@ public:
 private:
     int m_sockfd;
     sockaddr_in m_address;
-    char m_read_buf[READ_BUFFER_SIZE];
-    long m_read_idx;
-    long m_checked_idx;
+    char m_read_buf[READ_BUFFER_SIZE + 10]; //这里加10，是为了防止数据包刚好为READ_BUFFER_SIZE时，后面有位置存'\0'
+    //char m_file_buf[READ_BUFFER_SIZE];
+    long m_read_idx;    //缓冲区接收到的数据长度
+    long m_checked_idx; //缓冲区被查询的数据序号
+    long m_read_file_start;    //缓冲区文件开始
+    long m_read_file_end;    //缓冲区文件结束
     int m_start_line;
     char m_write_buf[WRITE_BUFFER_SIZE];
     int m_write_idx;
     CHECK_STATE m_check_state;
     METHOD m_method;
-    char m_real_file[FILENAME_LEN];
+    char m_real_file[FILENAME_LEN]; //存储文件名
     char *m_url;
     char *m_version;
     char *m_host;
-    long m_content_length;
+    long m_content_length;  //请求体长度
+    long m_content_remain;  //请求体剩余接收长度
     bool m_linger;
     char *m_file_address;
     struct stat m_file_stat;
@@ -140,6 +167,16 @@ private:
     int bytes_to_send;
     int bytes_have_send;
     char *doc_root;
+    map<string, string> headers;
+    string boundary;
+    string filename;
+    long file_length;
+    bool isformdata;
+    FORMDATA_STAGE formdata_stage;
+    map<string, string> formdata_attri;
+    FORMDATA_CODE formdata_code;
+    bool recv_segment;  //false: 完整http包；true：不完整http包
+    bool parse_by_line; //false: 不要逐行解析；true：逐行解析
 
     map<string, string> m_users;
     int m_TRIGMode;
