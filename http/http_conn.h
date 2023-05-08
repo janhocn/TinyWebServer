@@ -22,6 +22,7 @@
 #include <map>
 #include <regex>
 #include <string>
+#include <fstream>
 
 #include "../lock/locker.h"
 #include "../CGImysql/sql_connection_pool.h"
@@ -177,6 +178,7 @@ private:
     FORMDATA_CODE formdata_code;
     bool recv_segment;  //false: 完整http包；true：不完整http包
     bool parse_by_line; //false: 不要逐行解析；true：逐行解析
+    ofstream ofs;
 
     map<string, string> m_users;
     int m_TRIGMode;

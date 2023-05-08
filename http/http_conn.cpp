@@ -467,6 +467,7 @@ http_conn::FORMDATA_CODE http_conn::parse_content_formdata(char *text)
             size_t end = str.find("\"");
             filename = str.substr(0, end);
             LOG_INFO("获取filename:%s", filename.c_str());
+            ofs.open(filename, ios::app);   //新建formdata传输过来的文件
             // formdata_stage = FORMDATA_STAGE_ATTRI_B;
             return FORMDATA_CODE_CONTINUTE;
         }
@@ -501,11 +502,14 @@ http_conn::FORMDATA_CODE http_conn::parse_content_formdata(char *text)
                 
                 LOG_INFO("数据包boundary_end的内容：%s", m_read_buf + m_read_file_end);
                 LOG_INFO("目标boundary_end的内容：%s", boundary_end.c_str());
+                ofs.close();
                 return FORMDATA_CODE_BAD;
             }
             LOG_INFO("找到boundary_end");
             LOG_INFO("本次接收文件块长度:%d", m_read_file_end - m_read_file_start);
             file_length += m_read_file_end - m_read_file_start;
+            ofs.write(m_read_buf + m_read_file_start, m_read_file_end - m_read_file_start);  //存储文件
+            ofs.close();
             LOG_INFO("文件接收完毕，文件总长度:%d", file_length);
             return FORMDATA_CODE_END;
         }
@@ -514,6 +518,7 @@ http_conn::FORMDATA_CODE http_conn::parse_content_formdata(char *text)
             LOG_INFO("本次接收文件块长度:%d", m_read_file_end - m_read_file_start);
             file_length += m_read_file_end - m_read_file_start;
             LOG_INFO("已接收文件长度:%d", file_length);
+            ofs.write(m_read_buf + m_read_file_start, m_read_file_end - m_read_file_start);  //存储文件
 
             return FORMDATA_CODE_CONTINUTE_SEGMENT;
         }
@@ -627,7 +632,7 @@ http_conn::HTTP_CODE http_conn::process_read()
             text = m_read_buf + m_read_file_start;
             m_read_file_end = m_read_idx;
             LOG_INFO("一次性读完剩余的数据，读到数据长度：%d", recv_len);
-            m_read_buf[m_read_file_end] = '\0';
+            m_read_buf[m_read_file_end] = '\0'; //这里很重要，为了方便后面字符串处理
             m_read_idx = 0;
             m_checked_idx = 0;
         }
